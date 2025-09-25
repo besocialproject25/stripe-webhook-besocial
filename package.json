@@ -1,0 +1,9 @@
+{
+  "name": "stripe-webhook-besocial",
+  "version": "1.0.0",
+  "private": true,
+  "engines": { "node": "22.x" },
+  "dependencies": {
+    "stripe": "^14.0.0"
+  }
+}
