@@ -1,36 +1,49 @@
 // api/stripe-webhook.js
-import { buffer } from 'micro';
 import Stripe from 'stripe';
 
-export const config = { api: { bodyParser: false } }; // Requerido por Stripe
+// Necesario para que Stripe lea bien el cuerpo
+export const config = {
+  api: { bodyParser: false },
+};
 
+// Creamos el cliente Stripe con tu clave secreta
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: '2024-06-20',
 });
 
+// Función para leer el "cuerpo" de la petición
+function getRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
+  // Si abres la URL en el navegador, te responderá con "OK"
+  if (req.method !== 'POST') return res.status(200).send('OK');
 
   const sig = req.headers['stripe-signature'];
-  let event;
 
   try {
-    const buf = await buffer(req);
-    event = stripe.webhooks.constructEvent(
-      buf,
+    const rawBody = await getRawBody(req);
+    const event = stripe.webhooks.constructEvent(
+      rawBody,
       sig,
       process.env.STRIPE_WEBHOOK_SECRET
     );
+
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      console.log('✅ Pago recibido. Session:', session.id);
+    }
+
+    return res.json({ received: true });
   } catch (err) {
-    console.error('❌ Firma inválida:', err.message);
+    console.error('❌ Webhook error:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
-
-  if (event.type === 'checkout.session.completed') {
-    const session = event.data.object;
-    console.log('✅ Pago recibido. Session:', session.id);
-    // Aquí luego generaremos la tarjeta y enviaremos el email.
-  }
-
-  return res.json({ received: true });
 }
+
