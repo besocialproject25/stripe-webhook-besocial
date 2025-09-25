@@ -1,111 +1,127 @@
-// /api/stripe-webhook.js
-// Node serverless function (Vercel). CommonJS.
-
+// /api/stripe-webhook.js  (Vercel Serverless Function - Node.js)
 const Stripe = require('stripe');
+const getRawBody = require('raw-body');
+
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: '2022-11-15',
 });
 
-// Para Vercel: necesitamos el RAW body para verificar la firma.
 module.exports = async (req, res) => {
+  // Salud /diagnóstico rápido
+  if (req.method === 'GET') {
+    return res.status(200).send('OK /api/stripe-webhook');
+  }
+
   if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST, GET');
     return res.status(405).send('Method Not Allowed');
   }
 
-  // 1) Leer rawBody
-  const chunks = [];
-  for await (const chunk of req) chunks.push(Buffer.from(chunk));
-  const rawBody = Buffer.concat(chunks);
+  // 1) Verificar que tenemos los secrets
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!process.env.STRIPE_SECRET_KEY) {
+    console.error('❌ Falta STRIPE_SECRET_KEY en variables de entorno Vercel');
+    return res.status(500).json({ error: 'Missing STRIPE_SECRET_KEY' });
+  }
+  if (!webhookSecret) {
+    console.error('❌ Falta STRIPE_WEBHOOK_SECRET en variables de entorno Vercel');
+    return res.status(500).json({ error: 'Missing STRIPE_WEBHOOK_SECRET' });
+  }
 
-  const sig = req.headers['stripe-signature'];
+  // 2) Leer raw body (requisito Stripe)
   let event;
-
+  let rawBody;
   try {
-    event = stripe.webhooks.constructEvent(
-      rawBody,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
+    rawBody = await getRawBody(req);
   } catch (err) {
-    console.error('❌  Error verifying Stripe signature:', err.message);
+    console.error('❌ No se pudo leer raw body:', err);
+    return res.status(400).send('Invalid body');
+  }
+
+  // 3) Verificar firma de Stripe
+  const sig = req.headers['stripe-signature'];
+  try {
+    event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
+  } catch (err) {
+    console.error('❌ Firma inválida:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  try {
-    // 2) Solo nos interesa checkout.session.completed
-    if (event.type === 'checkout.session.completed') {
-      const session = event.data.object;
+  console.log('✅ Evento recibido:', event.type);
 
-      // Cargamos la sesión con sus line_items y expandimos el producto.
-      const sessionWithItems = await stripe.checkout.sessions.retrieve(session.id, {
-        expand: ['line_items.data.price.product'],
+  // 4) Procesar evento
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+
+    try {
+      // Line items del checkout
+      const lineItems = await stripe.checkout.sessions.listLineItems(session.id, {
+        expand: ['data.price.product'], // intentamos expandir producto directo
       });
 
-      const lineItems = sessionWithItems?.line_items?.data || [];
+      // ¿Alguna línea es una gift card (según metadata del product)?
+      let isGiftCard = false;
+      let giftItem = null;
 
-      // 3) ¿Alguna línea es gift_card?
-      const giftCardItems = lineItems.filter((item) => {
-        const product = item?.price?.product;
-        // producto está expandido → es un objeto
-        const metadata = product && typeof product === 'object' ? product.metadata : {};
-        return metadata && metadata.type === 'gift_card';
-      });
+      for (const item of lineItems.data) {
+        // item.price.product puede venir expandido (objeto) o como ID string
+        let product = item.price && item.price.product;
 
-      if (giftCardItems.length > 0) {
-        console.log(`🎁 Se han comprado ${giftCardItems.length} gift card(s)`);
-
-        // Datos del comprador/receptor
-        const buyerEmail = session.customer_details?.email || session.customer_email;
-        // Si usas Custom Fields en Payment Links, vendrían en session.custom_fields
-        // Si guardas info adicional en session.metadata, también puedes leerla aquí.
-
-        // 4) Generamos un código de regalo por cada ítem.
-        for (const item of giftCardItems) {
-          const qty = item.quantity || 1;
-          for (let i = 0; i < qty; i++) {
-            const code = generateGiftCode(); // Ej: BESP-ABCD-1234
-            // (Opcional) Guardar el código en tu BD/Sheet/Notion/Supabase, etc.
-            console.log('Código generado:', code);
-
-            // 5) Enviar email (sustituye esta función por tu proveedor real)
-            await sendGiftCardEmail({
-              to: buyerEmail,
-              code,
-              amount: (item.amount_total || 0) / 100, // si quieres monto por ítem
-              currency: item.currency || session.currency,
-            });
-          }
+        if (product && typeof product === 'string') {
+          // No se expandió, la obtenemos
+          product = await stripe.products.retrieve(product);
         }
-      } else {
-        console.log('✅ sesión completada sin gift cards.');
+
+        const md = product && product.metadata ? product.metadata : {};
+
+        // Marca que definas en tu producto de Stripe: gift_card:true, gift-card:true, etc
+        const markedAsGift =
+          md.gift_card === 'true' ||
+          md['gift-card'] === 'true' ||
+          md.giftcard === 'true';
+
+        if (markedAsGift) {
+          isGiftCard = true;
+          giftItem = { item, product };
+          break;
+        }
       }
+
+      if (!isGiftCard) {
+        console.log('ℹ️ Checkout completado pero NO es tarjeta regalo. Ignoramos.');
+        return res.status(200).json({ received: true, ignored: true });
+      }
+
+      // Aquí ya es gift card. Preparamos datos mínimos:
+      const customerEmail =
+        session.customer_details?.email || session.customer_email || session.metadata?.recipient_email;
+      const amount = session.amount_total; // centavos
+      const currency = session.currency;
+      const senderName = session.metadata?.sender_name || '';
+      const recipientName = session.metadata?.recipient_name || '';
+      const message = session.metadata?.message || '';
+
+      console.log('🎁 Gift card detectada. Datos para email/payload:', {
+        customerEmail,
+        amount,
+        currency,
+        senderName,
+        recipientName,
+        message,
+        giftItemName: giftItem?.item?.description,
+      });
+
+      // TODO: aquí envía el email / genera el PDF / guarda en DB / etc.
+      // Ejemplo: await sendGiftCardEmail({ customerEmail, amount, ... });
+
+      return res.status(200).json({ received: true, giftcard: true });
+    } catch (err) {
+      console.error('❌ Error manejando checkout.session.completed:', err);
+      return res.status(500).json({ error: 'handler_failed' });
     }
-
-    res.status(200).json({ received: true });
-  } catch (err) {
-    console.error('❌  Error en el manejador del webhook:', err);
-    res.status(500).send('Internal Server Error');
   }
+
+  // Otros eventos: no nos interesan, pero devolvemos 200 para que Stripe no reintente
+  console.log('🔎 Evento no manejado:', event.type);
+  return res.status(200).json({ received: true, unhandled: event.type });
 };
-
-// ---- utilidades ----
-
-function generateGiftCode() {
-  // Sencillo: BESP-XXXX-XXXX (puedes usar nanoid/uuid si prefieres)
-  const block = () => Math.random().toString(36).toUpperCase().slice(2, 6);
-  return `BESP-${block()}-${block()}`;
-}
-
-// Ejemplo: envia un email “falso”. Sustituye por tu proveedor real (Resend/SendGrid/etc)
-async function sendGiftCardEmail({ to, code, amount, currency }) {
-  if (!to) {
-    console.log('⚠️  No email in session; skipping email send.');
-    return;
-  }
-
-  // Ejemplo con console.log. Sustituye con tu implementación real:
-  // - Resend: https://resend.com/docs/api-reference/emails/send
-  // - SendGrid: https://docs.sendgrid.com/api-reference/mail-send/mail-send
-  // - Mailchimp Transactional (Mandrill)
-  console.log(`📧 Enviar email a ${to} con código: ${code} - ${amount || ''} ${currency || ''}`);
-}
