@@ -3,11 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": {
-    "node": "18.x"
-  },
+  "engines": { "node": "22.x" },
   "dependencies": {
-    "stripe": "^14.0.0",
-    "micro": "^9.4.1"
+    "stripe": "^14.0.0"
   }
 }
