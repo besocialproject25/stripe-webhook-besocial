@@ -110,7 +110,15 @@ module.exports = async (req, res) => {
         message,
         giftItemName: giftItem?.item?.description,
       });
-
+try {
+  await upsertMailchimpMember({
+    email: customerEmail,
+    firstName: recipientName || '',
+    tags: ['tarjeta_regalo'],
+  });
+} catch (e) {
+  console.error('❌ Error añadiendo a Mailchimp:', e);
+}
       // TODO: aquí envía el email / genera el PDF / guarda en DB / etc.
       // Ejemplo: await sendGiftCardEmail({ customerEmail, amount, ... });
 
