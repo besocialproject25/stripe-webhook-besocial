@@ -156,6 +156,27 @@ try {
       const senderName = session.metadata?.sender_name || '';
       const recipientName = session.metadata?.recipient_name || '';
       const message = session.metadata?.message || '';
+// --- Mailchimp: subir datos de la tarjeta regalo ---
+
+// Construimos los campos personalizados
+const mergeFields = {
+  RECIPIENT: recipientName || '',
+  GFTMSG: message || '',
+  SENDER: senderName || '',
+  AMOUNT: `${(amount / 100).toFixed(2)} ${currency.toUpperCase()}`,
+};
+
+// 1️⃣ Crear o actualizar el contacto en Mailchimp
+await upsertMailchimpContact({
+  email: customerEmail,
+  mergeFields,
+});
+
+// 2️⃣ Añadir etiqueta para disparar automatización
+await addMailchimpTag({
+  email: customerEmail,
+  tagName: 'tarjeta_regalo',
+});
 
       console.log('🎁 Gift card detectada. Datos para email/payload:', {
         customerEmail,
