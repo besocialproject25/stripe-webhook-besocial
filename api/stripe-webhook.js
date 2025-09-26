@@ -125,3 +125,49 @@ module.exports = async (req, res) => {
   console.log('🔎 Evento no manejado:', event.type);
   return res.status(200).json({ received: true, unhandled: event.type });
 };
+const crypto = require('crypto');
+
+async function upsertMailchimpMember({ email, firstName = '', lastName = '', tags = [] }) {
+  const server = process.env.MAILCHIMP_SERVER_PREFIX;
+  const listId = process.env.MAILCHIMP_AUDIENCE_ID;
+  const apiKey = process.env.MAILCHIMP_API_KEY;
+
+  const memberHash = crypto
+    .createHash('md5')
+    .update(email.toLowerCase())
+    .digest('hex');
+
+  // 1️⃣ Crear o actualizar el contacto
+  const putUrl = `https://${server}.api.mailchimp.com/3.0/lists/${listId}/members/${memberHash}`;
+  const putRes = await fetch(putUrl, {
+    method: 'PUT',
+    headers: {
+      Authorization: `apikey ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      email_address: email,
+      status_if_new: 'subscribed',
+      merge_fields: { FNAME: firstName, LNAME: lastName },
+    }),
+  });
+
+  const putJson = await putRes.json();
+  console.log('📬 Mailchimp upsert:', putRes.status, putJson.title || putJson.status);
+
+  // 2️⃣ Añadir etiquetas
+  if (tags.length) {
+    const tagsUrl = `https://${server}.api.mailchimp.com/3.0/lists/${listId}/members/${memberHash}/tags`;
+    const tagOps = tags.map((t) => ({ name: t, status: 'active' }));
+    const tagRes = await fetch(tagsUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `apikey ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ tags: tagOps }),
+    });
+    const tagJson = await tagRes.json().catch(() => ({}));
+    console.log('🏷️ Mailchimp tags:', tagRes.status, tagJson);
+  }
+}
