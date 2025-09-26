@@ -1,11 +1,15 @@
 // /api/stripe-webhook.js  (Vercel Serverless Function - Node.js)
 const Stripe = require('stripe');
 const getRawBody = require('raw-body');
-
+const mailchimp = require('@mailchimp/mailchimp_marketing');
+const crypto = require('crypto'); // para el hash MD5 del email
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: '2022-11-15',
 });
-
+mailchimp.setConfig({
+  apiKey: process.env.MAILCHIMP_API_KEY,
+  server: process.env.MAILCHIMP_SERVER_PREFIX, // ej: 'us1'
+});
 module.exports = async (req, res) => {
   // Salud /diagnóstico rápido
   if (req.method === 'GET') {
@@ -91,7 +95,40 @@ module.exports = async (req, res) => {
         console.log('ℹ️ Checkout completado pero NO es tarjeta regalo. Ignoramos.');
         return res.status(200).json({ received: true, ignored: true });
       }
+// ---------- MAILCHIMP: upsert + tags + merge fields ----------
+try {
+  const listId = process.env.MAILCHIMP_AUDIENCE_ID;
+  const email = (customerEmail || '').toLowerCase();
 
+  if (listId && email) {
+    // Hash MD5 del email para Mailchimp
+    const subscriberHash = crypto.createHash('md5').update(email).digest('hex');
+
+    // 1) Upsert del contacto
+    await mailchimp.lists.setListMember(listId, subscriberHash, {
+      email_address: email,
+      status_if_new: 'subscribed', // o 'pending' si quieres double opt-in
+      merge_fields: {
+        R_NAME: recipientName || '',
+        S_NAME: senderName || '',
+        G_MSG:  message || '',
+        AMOUNT: amount ? (amount / 100).toFixed(2) + ' ' + (currency || '').toUpperCase() : '',
+      },
+    });
+
+    // 2) Añadir/activar una etiqueta para que dispare el workflow
+    await mailchimp.lists.updateListMemberTags(listId, subscriberHash, {
+      tags: [{ name: 'tarjeta_regalo', status: 'active' }],
+    });
+
+    console.log('✅ Mailchimp actualizado para', email);
+  } else {
+    console.log('⚠️ No hay AUDIENCE_ID o email para Mailchimp');
+  }
+} catch (mcErr) {
+  console.error('❌ Error Mailchimp:', mcErr);
+}
+// ---------- FIN MAILCHIMP ----------
       // Aquí ya es gift card. Preparamos datos mínimos:
       const customerEmail =
         session.customer_details?.email || session.customer_email || session.metadata?.recipient_email;
