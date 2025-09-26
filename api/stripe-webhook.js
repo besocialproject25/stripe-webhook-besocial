@@ -56,7 +56,26 @@ module.exports = async (req, res) => {
   // 4) Procesar evento
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
+// Helper: obtiene el valor de un custom_field por posibles keys o por el texto del label.
+function getCustomField(session, options = []) {
+  const fields = session.custom_fields || [];
+  const norm = (s) => (s || '').toString().toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '');
 
+  for (const f of fields) {
+    const key = norm(f.key);
+    const label = norm(f.label?.custom);
+
+    // ¿Coincide por key exacta?
+    if (options.some(opt => norm(opt) === key)) {
+      return f.text?.value || '';
+    }
+    // ¿Coincide por label (contiene)?
+    if (options.some(opt => label.includes(norm(opt)))) {
+      return f.text?.value || '';
+    }
+  }
+  return '';
+}
     try {
       // Line items del checkout
       const lineItems = await stripe.checkout.sessions.listLineItems(session.id, {
@@ -214,5 +233,81 @@ async function upsertMailchimpMember({ email, firstName = '', lastName = '', tag
     });
     const tagJson = await tagRes.json().catch(() => ({}));
     console.log('🏷️ Mailchimp tags:', tagRes.status, tagJson);
+  }
+}
+const crypto = require('crypto');
+
+// Construye cabecera Authorization para Mailchimp
+function mailchimpHeaders() {
+  const apiKey = process.env.MAILCHIMP_API_KEY;
+  if (!apiKey) throw new Error('Missing MAILCHIMP_API_KEY');
+  const auth = Buffer.from(`anystring:${apiKey}`).toString('base64');
+  return {
+    'Content-Type': 'application/json',
+    'Authorization': `Basic ${auth}`,
+  };
+}
+
+// Crea/actualiza un contacto con merge fields
+async function upsertMailchimpContact({ email, mergeFields }) {
+  const apiKey = process.env.MAILCHIMP_API_KEY;
+  const server = process.env.MAILCHIMP_SERVER_PREFIX; // ej. 'us1'
+  const listId = process.env.MAILCHIMP_AUDIENCE_ID;
+
+  if (!apiKey || !server || !listId) {
+    console.warn('⚠️ Faltan variables de entorno de Mailchimp');
+    return;
+  }
+
+  const subscriberHash = crypto.createHash('md5').update(email.toLowerCase()).digest('hex');
+  const url = `https://${server}.api.mailchimp.com/3.0/lists/${listId}/members/${subscriberHash}`;
+
+  const body = {
+    email_address: email,
+    status_if_new: 'subscribed',  // suscríbelo si es nuevo
+    merge_fields: mergeFields,
+  };
+
+  const resp = await fetch(url, {
+    method: 'PUT',
+    headers: mailchimpHeaders(),
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text();
+    console.error('❌ Mailchimp upsert error:', resp.status, txt);
+    throw new Error('Mailchimp upsert failed');
+  }
+
+  console.log('✅ Mailchimp upsert OK', email);
+}
+
+// Añade una etiqueta 'tarjeta_regalo' al contacto
+async function addMailchimpTag({ email, tagName = 'tarjeta_regalo' }) {
+  const server = process.env.MAILCHIMP_SERVER_PREFIX;
+  const listId = process.env.MAILCHIMP_AUDIENCE_ID;
+  const apiKey = process.env.MAILCHIMP_API_KEY;
+
+  if (!apiKey || !server || !listId) return;
+
+  const subscriberHash = crypto.createHash('md5').update(email.toLowerCase()).digest('hex');
+  const url = `https://${server}.api.mailchimp.com/3.0/lists/${listId}/members/${subscriberHash}/tags`;
+
+  const body = {
+    tags: [{ name: tagName, status: 'active' }],
+  };
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: mailchimpHeaders(),
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text();
+    console.error('❌ Mailchimp tags error:', resp.status, txt);
+  } else {
+    console.log('✅ Mailchimp tags OK', tagName);
   }
 }
