@@ -256,8 +256,6 @@ async function upsertMailchimpMember({ email, firstName = '', lastName = '', tag
     console.log('🏷️ Mailchimp tags:', tagRes.status, tagJson);
   }
 }
-const crypto = require('crypto');
-
 // Construye cabecera Authorization para Mailchimp
 function mailchimpHeaders() {
   const apiKey = process.env.MAILCHIMP_API_KEY;
