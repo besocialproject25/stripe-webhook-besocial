@@ -3,12 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "type": "commonjs",
-  "engines": {
-    "node": "22.x"
-  },
+  "engines": { "node": "22.x" },
   "dependencies": {
     "stripe": "^14.0.0",
     "raw-body": "^2.5.2",
-    "@mailchimp/mailchimp_marketing": "^3.0.80" 
+    "@mailchimp/mailchimp_marketing": "^3.0.80"
   }
 }
