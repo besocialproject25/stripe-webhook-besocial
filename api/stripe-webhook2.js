@@ -41,7 +41,6 @@ module.exports = async (req, res) => {
       for (const f of fields) {
         const key = norm(f.key);
         const label = norm(f.label?.custom);
-        // coincide por key exacta o por inclusión en la etiqueta visible
         if (options.some((opt) => norm(opt) === key)) return f.text?.value || '';
         if (label && options.some((opt) => label.includes(norm(opt)))) return f.text?.value || '';
       }
@@ -124,36 +123,3 @@ module.exports = async (req, res) => {
           console.error('Mailchimp recipient failed:', e?.message || e);
         }
       }
-
-      return res.status(200).json({
-        received: true,
-        giftcard: true,
-        buyerEmail,
-        recipientEmail,
-      });
-    } catch (err) {
-      console.error('handler_failed:', err);
-      // Respondemos 200 para que Stripe no reintente si el fallo es nuestro
-      return res.status(200).json({ received: true, soft_error: true });
-    }
-  }
-
-  return res.status(200).json({ received: true, unhandled: event.type });
-};
-
-// --------- Detección robusta de Gift Card ----------
-async function detectGiftCard(session, lineItems, getCustomField) {
-  let isGiftCard = false;
-
-  const metaKeys = ['gift_card', 'gift-card', 'giftcard', 'is_gift_card', 'tarjeta_regalo'];
-  const nameKeywords = [
-    'gift card','gift-card','giftcard',
-    'tarjeta regalo','tarjeta-regalo','bono regalo',
-    'donación regalo','donacion regalo','donacion-regalo'
-  ];
-
-  const isTrue = (v) => {
-    const s = String(v ?? '').toLowerCase().trim();
-    return s === 'true' || s === '1' || v === true;
-  };
-  const inc
