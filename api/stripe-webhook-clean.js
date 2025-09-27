@@ -37,7 +37,7 @@ module.exports = async (req, res) => {
 
   const session = event.data.object;
 
-  // Helper para leer custom fields por key/label (tolerante a acentos)
+  // Helper: leer custom_fields del Checkout por key/label (tolerante a acentos)
   function getCustomField(sess, options) {
     const fields = Array.isArray(sess.custom_fields) ? sess.custom_fields : [];
     const norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '');
@@ -86,13 +86,12 @@ module.exports = async (req, res) => {
       return res.status(200).json({ received: true, giftcard: true, buyerEmail: null });
     }
 
-    // ===== Enviar SOLO los merge tags existentes (RECIPIENT, GFTMSG, AMOUNT/IMPORTE) =====
+    // ===== Enviar SOLO estos merge tags si existen en tu Audience =====
     const existing = await getMailchimpMergeTags(); // Set en mayúsculas
     const desired = {
-      RECIPIENT:  recipientName,
-      GFTMSG:     message,
-      AMOUNT:     formattedAmount, // si existe
-      IMPORTE:    formattedAmount, // si usas este en vez de AMOUNT
+      RECIPIENT: recipientName, // nombre destinatario
+      GFTMSG:    message,       // mensaje
+      AMOUNT:    formattedAmount // p.ej. "25.00 EUR"
     };
     const mergeFields = {};
     for (const [k, v] of Object.entries(desired)) {
