@@ -58,4 +58,59 @@ module.exports = async (req, res) => {
       expand: ['data.price.product'],
     });
 
-    // Detectar si es
+    // Detectar si es gift card
+    const { isGiftCard } = await detectGiftCard(session, lineItems, getCustomField);
+    if (!isGiftCard) return res.status(200).json({ received: true, ignored: true });
+
+    // ===== Mapear datos desde Stripe =====
+    const buyerEmail =
+      (session.customer_details && session.customer_details.email) ||
+      session.customer_email ||
+      (session.metadata && session.metadata.buyer_email) ||
+      null;
+
+    const recipientName =
+      (session.metadata && session.metadata.recipient_name) ||
+      getCustomField(session, ['Nombre del cumpleañero']) || '';
+
+    const recipientEmail =
+      (session.metadata && session.metadata.recipient_email) ||
+      getCustomField(session, ['Email del cumpleañero']) || null;
+
+    const message =
+      (session.metadata && session.metadata.message) ||
+      getCustomField(session, ['Mensaje para el cumpleañero']) || '';
+
+    // Remitente (opcional): CF/metadata -> nombre comprador -> prefijo email -> Stripe Customer
+    let senderName =
+      (session.metadata && session.metadata.sender_name) ||
+      getCustomField(session, ['Tu nombre', 'Remitente', 'Quien envia', 'Sender']) ||
+      (session.customer_details && session.customer_details.name) ||
+      '';
+
+    if (!senderName) {
+      const buyerMail =
+        (session.customer_details && session.customer_details.email) ||
+        session.customer_email ||
+        (session.metadata && session.metadata.buyer_email) ||
+        null;
+      if (buyerMail) senderName = String(buyerMail).split('@')[0];
+    }
+    if (!senderName && session.customer && typeof session.customer === 'string') {
+      try {
+        const cust = await stripe.customers.retrieve(session.customer);
+        senderName = cust.name || (cust.email ? String(cust.email).split('@')[0] : '') || '';
+      } catch (e) {}
+    }
+
+    const amount = session.amount_total; // centavos
+    const currency = session.currency;
+    const formattedAmount = `${(amount / 100).toFixed(2)} ${String(currency || '').toUpperCase()}`;
+
+    // ===== Solo actualizamos el CONTACTO DEL COMPRADOR =====
+    if (!buyerEmail) {
+      console.warn('No buyerEmail; cannot upsert Mailchimp contact.');
+      return res.status(200).json({ received: true, giftcard: true, buyerEmail: null, recipientEmail });
+    }
+
+    // Descubrir MERGE TAGS real
