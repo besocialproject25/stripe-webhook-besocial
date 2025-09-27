@@ -86,88 +86,95 @@ module.exports = async (req, res) => {
         expand: ['data.price.product'], // intentamos expandir producto directo
       });
 
-      // ¿Alguna línea es una gift card (según metadata del product)?
+      // ========= DETECCIÓN DE GIFT CARD =========
       let isGiftCard = false;
       let giftItem = null;
 
-// ¿Alguna línea es una gift card?
-let isGiftCard = false;
-let giftItem = null;
+      // helpers para detectar "true"
+      const isTrue = (v) => {
+        const s = String(v ?? '').toLowerCase().trim();
+        return s === 'true' || s === '1' || v === true;
+      };
+      const giftKeys = ['gift_card', 'gift-card', 'giftcard'];
 
-// helpers para detectar "true"
-const isTrue = (v) => {
-  const s = String(v ?? '').toLowerCase().trim();
-  return s === 'true' || s === '1' || v === true;
-};
-const giftKeys = ['gift_card', 'gift-card', 'giftcard'];
+      // 1) Reglas por metadata en price/product
+      for (const item of lineItems.data) {
+        // item.price.product puede venir expandido (objeto) o como ID string
+        let product = item.price && item.price.product;
 
-// 1) Reglas por metadata en price/product
-for (const item of lineItems.data) {
-  // item.price.product puede venir expandido (objeto) o como ID string
-  let product = item.price && item.price.product;
+        if (product && typeof product === 'string') {
+          // No se expandió, la obtenemos
+          product = await stripe.products.retrieve(product);
+        }
 
-  if (product && typeof product === 'string') {
-    // No se expandió, la obtenemos
-    product = await stripe.products.retrieve(product);
-  }
+        const priceMd = (item.price && item.price.metadata) || {};
+        const prodMd = (product && product.metadata) || {};
 
-  const priceMd = (item.price && item.price.metadata) || {};
-  const prodMd  = (product && product.metadata) || {};
+        // ¿Alguna key típica en price.metadata o product.metadata marcada a true?
+        const priceFlag = giftKeys.some((k) => isTrue(priceMd[k]));
+        const prodFlag = giftKeys.some((k) => isTrue(prodMd[k]));
 
-  // ¿Alguna key típica en price.metadata o product.metadata marcada a true?
-  const priceFlag = giftKeys.some(k => isTrue(priceMd[k]));
-  const prodFlag  = giftKeys.some(k => isTrue(prodMd[k]));
+        if (priceFlag || prodFlag) {
+          console.log('🎯 Gift flag por metadata:', {
+            priceMetadata: priceMd,
+            productMetadata: prodMd,
+            matched: priceFlag ? 'price.metadata' : 'product.metadata',
+          });
+          isGiftCard = true;
+          giftItem = { item, product };
+          break;
+        }
+      }
 
-  if (priceFlag || prodFlag) {
-    console.log('🎯 Gift flag por metadata:', {
-      priceMetadata: priceMd,
-      productMetadata: prodMd,
-      matched: priceFlag ? 'price.metadata' : 'product.metadata'
-    });
-    isGiftCard = true;
-    giftItem = { item, product };
-    break;
-  }
-}
+      // 2) Reglas por metadata en la session (por si el Payment Link lleva meta)
+      if (!isGiftCard) {
+        const sessionMeta = session.metadata || {};
+        const sessionFlag = giftKeys.some((k) => isTrue(sessionMeta[k]));
+        if (sessionFlag) {
+          console.log('🎯 Gift flag por session.metadata:', sessionMeta);
+          isGiftCard = true;
+        }
+      }
 
-// 2) Reglas por metadata en la session (por si el Payment Link lleva meta)
-if (!isGiftCard) {
-  const sessionMeta = session.metadata || {};
-  const sessionFlag = giftKeys.some(k => isTrue(sessionMeta[k]));
-  if (sessionFlag) {
-    console.log('🎯 Gift flag por session.metadata:', sessionMeta);
-    isGiftCard = true;
-  }
-}
+      // 3) Reglas por presencia de custom fields (si están los campos típicos de la tarjeta)
+      if (!isGiftCard) {
+        const hasRecipientEmail = !!getCustomField(session, [
+          'email del cumpleañero',
+          'email cumpleanero',
+          'email del cumpleanero',
+          'email',
+        ]);
+        const hasRecipientName = !!getCustomField(session, [
+          'nombre del cumpleañero',
+          'nombre de la persona',
+          'nombre cumpleanero',
+          'nombre',
+        ]);
+        const hasMessage = !!getCustomField(session, [
+          'mensaje',
+          'mensaje para el cumpleañero',
+          'mensaje para el cumpleanero',
+        ]);
 
-// 3) Reglas por presencia de custom fields (si están los campos típicos de la tarjeta)
-if (!isGiftCard) {
-  const hasRecipientEmail = !!getCustomField(session, [
-    'email del cumpleañero', 'email cumpleanero', 'email del cumpleanero', 'email'
-  ]);
-  const hasRecipientName  = !!getCustomField(session, [
-    'nombre del cumpleañero', 'nombre de la persona', 'nombre cumpleanero', 'nombre'
-  ]);
-  const hasMessage        = !!getCustomField(session, [
-    'mensaje', 'mensaje para el cumpleañero', 'mensaje para el cumpleanero'
-  ]);
+        if (hasRecipientEmail || hasRecipientName || hasMessage) {
+          console.log('🎯 Gift flag por custom_fields:', {
+            hasRecipientEmail,
+            hasRecipientName,
+            hasMessage,
+            custom_fields: session.custom_fields,
+          });
+          isGiftCard = true;
+        }
+      }
 
-  if (hasRecipientEmail || hasRecipientName || hasMessage) {
-    console.log('🎯 Gift flag por custom_fields:', {
-      hasRecipientEmail, hasRecipientName, hasMessage,
-      custom_fields: session.custom_fields
-    });
-    isGiftCard = true;
-  }
-}
-
-if (!isGiftCard) {
-  console.log('ℹ️ Checkout completado pero NO es tarjeta regalo. Ignoramos.', {
-    sessionMetadata: session.metadata,
-    customFields: session.custom_fields
-  });
-  return res.status(200).json({ received: true, ignored: true });
-}
+      if (!isGiftCard) {
+        console.log('ℹ️ Checkout completado pero NO es tarjeta regalo. Ignoramos.', {
+          sessionMetadata: session.metadata,
+          customFields: session.custom_fields,
+        });
+        return res.status(200).json({ received: true, ignored: true });
+      }
+      // ========= FIN DETECCIÓN =========
 
       // Aquí ya es gift card. Preparamos datos mínimos para Mailchimp:
       const customerEmail =
@@ -210,13 +217,6 @@ if (!isGiftCard) {
         message,
         giftItemName: giftItem?.item?.description,
       });
-
-      // (Opcional) upsert + tags en 2 llamadas usando REST también:
-      // await upsertMailchimpMember({
-      //   email: customerEmail,
-      //   firstName: recipientName || '',
-      //   tags: ['tarjeta_regalo'],
-      // });
 
       // TODO: aquí envía el email / genera el PDF / guarda en DB / etc.
 
@@ -355,4 +355,3 @@ async function upsertMailchimpMember({ email, firstName = '', lastName = '', tag
     console.log('🏷️ Mailchimp tags:', tagRes.status, tagJson);
   }
 }
-
