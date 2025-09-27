@@ -90,32 +90,84 @@ module.exports = async (req, res) => {
       let isGiftCard = false;
       let giftItem = null;
 
-      for (const item of lineItems.data) {
-        // item.price.product puede venir expandido (objeto) o como ID string
-        let product = item.price && item.price.product;
+// ¿Alguna línea es una gift card?
+let isGiftCard = false;
+let giftItem = null;
 
-        if (product && typeof product === 'string') {
-          // No se expandió, la obtenemos
-          product = await stripe.products.retrieve(product);
-        }
+// helpers para detectar "true"
+const isTrue = (v) => {
+  const s = String(v ?? '').toLowerCase().trim();
+  return s === 'true' || s === '1' || v === true;
+};
+const giftKeys = ['gift_card', 'gift-card', 'giftcard'];
 
-        const md = product && product.metadata ? product.metadata : {};
+// 1) Reglas por metadata en price/product
+for (const item of lineItems.data) {
+  // item.price.product puede venir expandido (objeto) o como ID string
+  let product = item.price && item.price.product;
 
-        // Marca que definas en tu producto de Stripe: gift_card:true, gift-card:true, etc
-        const markedAsGift =
-          md.gift_card === 'true' || md['gift-card'] === 'true' || md.giftcard === 'true';
+  if (product && typeof product === 'string') {
+    // No se expandió, la obtenemos
+    product = await stripe.products.retrieve(product);
+  }
 
-        if (markedAsGift) {
-          isGiftCard = true;
-          giftItem = { item, product };
-          break;
-        }
-      }
+  const priceMd = (item.price && item.price.metadata) || {};
+  const prodMd  = (product && product.metadata) || {};
 
-      if (!isGiftCard) {
-        console.log('ℹ️ Checkout completado pero NO es tarjeta regalo. Ignoramos.');
-        return res.status(200).json({ received: true, ignored: true });
-      }
+  // ¿Alguna key típica en price.metadata o product.metadata marcada a true?
+  const priceFlag = giftKeys.some(k => isTrue(priceMd[k]));
+  const prodFlag  = giftKeys.some(k => isTrue(prodMd[k]));
+
+  if (priceFlag || prodFlag) {
+    console.log('🎯 Gift flag por metadata:', {
+      priceMetadata: priceMd,
+      productMetadata: prodMd,
+      matched: priceFlag ? 'price.metadata' : 'product.metadata'
+    });
+    isGiftCard = true;
+    giftItem = { item, product };
+    break;
+  }
+}
+
+// 2) Reglas por metadata en la session (por si el Payment Link lleva meta)
+if (!isGiftCard) {
+  const sessionMeta = session.metadata || {};
+  const sessionFlag = giftKeys.some(k => isTrue(sessionMeta[k]));
+  if (sessionFlag) {
+    console.log('🎯 Gift flag por session.metadata:', sessionMeta);
+    isGiftCard = true;
+  }
+}
+
+// 3) Reglas por presencia de custom fields (si están los campos típicos de la tarjeta)
+if (!isGiftCard) {
+  const hasRecipientEmail = !!getCustomField(session, [
+    'email del cumpleañero', 'email cumpleanero', 'email del cumpleanero', 'email'
+  ]);
+  const hasRecipientName  = !!getCustomField(session, [
+    'nombre del cumpleañero', 'nombre de la persona', 'nombre cumpleanero', 'nombre'
+  ]);
+  const hasMessage        = !!getCustomField(session, [
+    'mensaje', 'mensaje para el cumpleañero', 'mensaje para el cumpleanero'
+  ]);
+
+  if (hasRecipientEmail || hasRecipientName || hasMessage) {
+    console.log('🎯 Gift flag por custom_fields:', {
+      hasRecipientEmail, hasRecipientName, hasMessage,
+      custom_fields: session.custom_fields
+    });
+    isGiftCard = true;
+  }
+}
+
+if (!isGiftCard) {
+  console.log('ℹ️ Checkout completado pero NO es tarjeta regalo. Ignoramos.', {
+    sessionMetadata: session.metadata,
+    customFields: session.custom_fields
+  });
+  return res.status(200).json({ received: true, ignored: true });
+}
 
       // Aquí ya es gift card. Preparamos datos mínimos para Mailchimp:
       const customerEmail =
