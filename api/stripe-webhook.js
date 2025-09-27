@@ -210,8 +210,6 @@ try {
   console.log('🔎 Evento no manejado:', event.type);
   return res.status(200).json({ received: true, unhandled: event.type });
 };
-const crypto = require('crypto');
-
 async function upsertMailchimpMember({ email, firstName = '', lastName = '', tags = [] }) {
   const server = process.env.MAILCHIMP_SERVER_PREFIX;
   const listId = process.env.MAILCHIMP_AUDIENCE_ID;
