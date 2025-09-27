@@ -199,4 +199,11 @@ async function detectGiftCard(session, lineItems, getCustomField) {
       'mensaje', 'mensaje para el cumpleañero', 'mensaje para el cumpleanero'
     ]);
     if (hasRecipientEmail || hasRecipientName || hasMessage) {
-      console.log('🎯 Gift flag por custom_fields:',
+console.log('🎯 Gift flag por custom_fields:', {
+  hasRecipientEmail,
+  hasRecipientName,
+  hasMessage,
+  custom_fields: session.custom_fields
+});
+isGiftCard = true;
+
