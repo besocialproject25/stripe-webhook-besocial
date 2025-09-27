@@ -167,12 +167,13 @@ async function detectGiftCard(session, lineItems, getCustomField) {
     return s === 'true' || s === '1' || v === true;
   };
 
-  const includesKeyword = (txt = '') => {
-    const t = String(txt).toLowerCase();
-    for (const k of nameKeywords) {
-      if (t.includes(k)) return true;
-    }
-    return false;
+function includesKeyword(txt = '') {
+  const t = String(txt).toLowerCase();
+  for (const k of nameKeywords) {
+    if (t.includes(k)) return true;
+  }
+  return false;
+}
   };
 
   // 1) Metadata en price/product
