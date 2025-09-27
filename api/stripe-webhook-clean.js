@@ -13,12 +13,16 @@ module.exports = async (req, res) => {
   }
 
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!process.env.STRIPE_SECRET_KEY || !webhookSecret)
+  if (!process.env.STRIPE_SECRET_KEY || !webhookSecret) {
     return res.status(500).json({ error: 'Missing Stripe keys' });
+  }
 
+  // Leer raw body (requisito de Stripe)
   let rawBody;
-  try { rawBody = await getRawBody(req); } catch { return res.status(400).send('Invalid body'); }
+  try { rawBody = await getRawBody(req); }
+  catch { return res.status(400).send('Invalid body'); }
 
+  // Verificar firma
   const sig = req.headers['stripe-signature'];
   let event;
   try {
@@ -27,8 +31,9 @@ module.exports = async (req, res) => {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  if (event.type !== 'checkout.session.completed')
+  if (event.type !== 'checkout.session.completed') {
     return res.status(200).json({ received: true, unhandled: event.type });
+  }
 
   const session = event.data.object;
 
@@ -48,7 +53,7 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // Cargar líneas para detección
+    // Cargar líneas (para detección)
     const lineItems = await stripe.checkout.sessions.listLineItems(session.id, {
       expand: ['data.price.product'],
     });
@@ -57,65 +62,68 @@ module.exports = async (req, res) => {
     const { isGiftCard } = await detectGiftCard(session, lineItems, getCustomField);
     if (!isGiftCard) return res.status(200).json({ received: true, ignored: true });
 
-    // ====== MAPEO DE DATOS (según tus campos en Stripe) ======
-    // Email del comprador (quien paga)
+    // ===== Mapear datos desde Stripe =====
     const buyerEmail =
-      session.customer_details?.email ||
+      (session.customer_details && session.customer_details.email) ||
       session.customer_email ||
-      session.metadata?.buyer_email ||
+      (session.metadata && session.metadata.buyer_email) ||
       null;
 
-    // Campos EXACTOS del checkout (etiquetas visibles)
     const recipientName =
-      session.metadata?.recipient_name ||
-      getCustomField(session, ['Nombre del cumpleañero']) ||
-      '';
+      (session.metadata && session.metadata.recipient_name) ||
+      getCustomField(session, ['Nombre del cumpleañero']) || '';
 
     const recipientEmail =
-      session.metadata?.recipient_email ||
-      getCustomField(session, ['Email del cumpleañero']) ||
-      null;
+      (session.metadata && session.metadata.recipient_email) ||
+      getCustomField(session, ['Email del cumpleañero']) || null;
 
     const message =
-      session.metadata?.message ||
-      getCustomField(session, ['Mensaje para el cumpleañero']) ||
-      '';
+      (session.metadata && session.metadata.message) ||
+      getCustomField(session, ['Mensaje para el cumpleañero']) || '';
 
-    // Opcional: nombre del remitente si lo recogéis
     const senderName =
-      session.metadata?.sender_name ||
-      getCustomField(session, ['Tu nombre', 'Remitente', 'Quien envia', 'Sender']) ||
-      '';
+      (session.metadata && session.metadata.sender_name) ||
+      getCustomField(session, ['Tu nombre', 'Remitente', 'Quien envia', 'Sender']) || '';
 
-    const amount = session.amount_total; // en centavos
+    const amount = session.amount_total; // centavos
     const currency = session.currency;
     const formattedAmount = `${(amount / 100).toFixed(2)} ${String(currency || '').toUpperCase()}`;
 
-    // Enviamos claves ES/EN a la vez; Mailchimp ignora las que no existan
-    const mergeFieldsForBoth = {
-      // nombre del destinatario
-      RECEPTOR:  recipientName || '',
-      RECIPIENT: recipientName || '',
-      // mensaje
-      MENSAJE:   message || '',
-      GFTMSG:    message || '',
-      // remitente
-      SENDER:    senderName || '',
-      // importe
+    // ===== Descubrir MERGE TAGS reales de tu Audience =====
+    const existingTags = await getMailchimpMergeTags(); // Set de tags en mayúsculas
+
+    // Candidatos (ES/EN). Solo enviaremos los que existan.
+    const candidateMerge = {
+      RECEPTOR:  recipientName,
+      RECIPIENT: recipientName,
+      MENSAJE:   message,
+      GFTMSG:    message,
+      SENDER:    senderName,
       IMPORTE:   formattedAmount,
       AMOUNT:    formattedAmount,
     };
 
-    // (debug opcional)
-    console.log('Mailchimp payload', {
-      buyerEmail, recipientEmail, recipientName, senderName, message, formattedAmount
+    const mergeForSend = {};
+    for (const [tag, val] of Object.entries(candidateMerge)) {
+      if (existingTags.has(tag)) mergeForSend[tag] = val || '';
+    }
+
+    // Si no coincide ninguno, lo registramos para que puedas crear los campos
+    if (Object.keys(mergeForSend).length === 0) {
+      console.warn('No matching merge tags in audience. Existing tags:', Array.from(existingTags));
+    }
+
+    // Debug de valores y tags encontrados
+    console.log('Mailchimp payload →', {
+      buyerEmail, recipientEmail, recipientName, senderName, message, formattedAmount,
+      sendingMergeTags: mergeForSend
     });
 
-    // ====== MAILCHIMP ====== (no romper el webhook si falla)
-    // 1) Buyer (quien paga)
+    // ===== Mailchimp (sin romper el webhook si falla) =====
+    // Comprador
     if (buyerEmail) {
       try {
-        await upsertMailchimpContact({ email: buyerEmail, mergeFields: mergeFieldsForBoth });
+        await upsertMailchimpContact({ email: buyerEmail, mergeFields: mergeForSend });
         await addMailchimpTag({ email: buyerEmail, tagName: 'gift_buyer' });
         await addMailchimpTag({ email: buyerEmail, tagName: 'tarjeta_regalo' });
       } catch (e) {
@@ -123,10 +131,10 @@ module.exports = async (req, res) => {
       }
     }
 
-    // 2) Recipient (quien recibe)
+    // Destinatario
     if (recipientEmail) {
       try {
-        await upsertMailchimpContact({ email: recipientEmail, mergeFields: mergeFieldsForBoth });
+        await upsertMailchimpContact({ email: recipientEmail, mergeFields: mergeForSend });
         await addMailchimpTag({ email: recipientEmail, tagName: 'gift_recipient' });
         await addMailchimpTag({ email: recipientEmail, tagName: 'tarjeta_regalo' });
       } catch (e) {
@@ -137,12 +145,11 @@ module.exports = async (req, res) => {
     return res.status(200).json({ received: true, giftcard: true, buyerEmail, recipientEmail });
   } catch (err) {
     console.error('handler_failed:', err);
-    // Respondemos 200 para que Stripe no reintente si el fallo es nuestro
     return res.status(200).json({ received: true, soft_error: true });
   }
 };
 
-// Función limpia, sin "const inc"
+// --------- Detección de Gift Card (sin arrows problemáticas) ----------
 async function detectGiftCard(session, lineItems, getCustomField) {
   let isGiftCard = false;
   const metaKeys = ['gift_card', 'gift-card', 'giftcard', 'tarjeta_regalo'];
@@ -178,7 +185,7 @@ async function detectGiftCard(session, lineItems, getCustomField) {
     }
   }
 
-  // 3) Custom fields típicos del Checkout
+  // 3) Custom fields del Checkout
   if (!isGiftCard) {
     const hasRecipientEmail = !!getCustomField(session, ['Email del cumpleañero']);
     const hasRecipientName  = !!getCustomField(session, ['Nombre del cumpleañero']);
@@ -197,6 +204,28 @@ function mailchimpHeaders() {
   return { 'Content-Type': 'application/json', Authorization: `Basic ${auth}` };
 }
 
+// Devuelve un Set con los MERGE TAGS disponibles en la Audience
+async function getMailchimpMergeTags() {
+  const server = process.env.MAILCHIMP_SERVER_PREFIX; // ej. 'us1'
+  const listId = process.env.MAILCHIMP_AUDIENCE_ID;
+  const tags = new Set();
+  if (!server || !listId) return tags;
+
+  const url = `https://${server}.api.mailchimp.com/3.0/lists/${listId}/merge-fields?count=100`;
+  try {
+    const resp = await fetch(url, { headers: mailchimpHeaders() });
+    const json = await resp.json().catch(() => ({}));
+    if (json && Array.isArray(json.merge_fields)) {
+      for (const f of json.merge_fields) {
+        if (f && typeof f.tag === 'string') tags.add(String(f.tag).toUpperCase());
+      }
+    }
+  } catch (e) {
+    console.error('getMailchimpMergeTags failed:', e?.message || e);
+  }
+  return tags;
+}
+
 async function upsertMailchimpContact({ email, mergeFields }) {
   const server = process.env.MAILCHIMP_SERVER_PREFIX; // ej. 'us1'
   const listId = process.env.MAILCHIMP_AUDIENCE_ID;
@@ -207,7 +236,7 @@ async function upsertMailchimpContact({ email, mergeFields }) {
   const body = {
     email_address: email,
     status_if_new: 'subscribed',
-    merge_fields: mergeFields,
+    merge_fields: mergeFields || {},
   };
 
   const resp = await fetch(url, { method: 'PUT', headers: mailchimpHeaders(), body: JSON.stringify(body) });
