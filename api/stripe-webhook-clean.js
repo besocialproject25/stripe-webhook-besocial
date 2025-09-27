@@ -73,53 +73,24 @@ module.exports = async (req, res) => {
       (session.metadata && session.metadata.recipient_name) ||
       getCustomField(session, ['Nombre del cumpleañero']) || '';
 
-    const recipientEmail =
-      (session.metadata && session.metadata.recipient_email) ||
-      getCustomField(session, ['Email del cumpleañero']) || null;
-
     const message =
       (session.metadata && session.metadata.message) ||
       getCustomField(session, ['Mensaje para el cumpleañero']) || '';
-
-    // Remitente (opcional): CF/metadata -> nombre comprador -> prefijo email -> Stripe Customer
-    let senderName =
-      (session.metadata && session.metadata.sender_name) ||
-      getCustomField(session, ['Tu nombre', 'Remitente', 'Quien envia', 'Sender']) ||
-      (session.customer_details && session.customer_details.name) ||
-      '';
-
-    if (!senderName) {
-      const buyerMail =
-        (session.customer_details && session.customer_details.email) ||
-        session.customer_email ||
-        (session.metadata && session.metadata.buyer_email) ||
-        null;
-      if (buyerMail) senderName = String(buyerMail).split('@')[0];
-    }
-    if (!senderName && session.customer && typeof session.customer === 'string') {
-      try {
-        const cust = await stripe.customers.retrieve(session.customer);
-        senderName = cust.name || (cust.email ? String(cust.email).split('@')[0] : '') || '';
-      } catch (e) {}
-    }
 
     const amount = session.amount_total; // centavos
     const currency = session.currency;
     const formattedAmount = `${(amount / 100).toFixed(2)} ${String(currency || '').toUpperCase()}`;
 
-    // ===== Solo actualizamos el CONTACTO DEL COMPRADOR =====
     if (!buyerEmail) {
       console.warn('No buyerEmail; cannot upsert Mailchimp contact.');
-      return res.status(200).json({ received: true, giftcard: true, buyerEmail: null, recipientEmail });
+      return res.status(200).json({ received: true, giftcard: true, buyerEmail: null });
     }
 
-    // Descubrir MERGE TAGS reales y enviar solo los existentes
+    // ===== Enviar SOLO los merge tags existentes (RECIPIENT, GFTMSG, AMOUNT/IMPORTE) =====
     const existing = await getMailchimpMergeTags(); // Set en mayúsculas
     const desired = {
-      RECIPIENT:  recipientName,   // nombre del receptor
-      GFTMSG:     message,         // mensaje
-      SENDER:     senderName,      // opcional si tienes el campo
-      EMAIL_REC:  recipientEmail,  // email del receptor guardado EN el contacto del comprador
+      RECIPIENT:  recipientName,
+      GFTMSG:     message,
       AMOUNT:     formattedAmount, // si existe
       IMPORTE:    formattedAmount, // si usas este en vez de AMOUNT
     };
@@ -129,7 +100,7 @@ module.exports = async (req, res) => {
     }
 
     console.log('Mailchimp payload →', {
-      buyerEmail, recipientEmail, recipientName, senderName, message, formattedAmount, mergeFields
+      buyerEmail, recipientName, message, formattedAmount, mergeFields
     });
 
     // Upsert del comprador + etiquetas
@@ -141,8 +112,7 @@ module.exports = async (req, res) => {
       console.error('Mailchimp buyer failed:', e?.message || e);
     }
 
-    // NO creamos/actualizamos contacto del destinatario
-    return res.status(200).json({ received: true, giftcard: true, buyerEmail, recipientEmail });
+    return res.status(200).json({ received: true, giftcard: true, buyerEmail });
   } catch (err) {
     console.error('handler_failed:', err);
     return res.status(200).json({ received: true, soft_error: true });
@@ -185,7 +155,7 @@ async function detectGiftCard(session, lineItems, getCustomField) {
     }
   }
 
-  // 3) Custom fields del Checkout
+  // 3) Custom fields del Checkout (mantenemos para detección)
   if (!isGiftCard) {
     const hasRecipientEmail = !!getCustomField(session, ['Email del cumpleañero']);
     const hasRecipientName  = !!getCustomField(session, ['Nombre del cumpleañero']);
