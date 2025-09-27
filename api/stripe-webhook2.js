@@ -52,8 +52,19 @@ module.exports = async (req, res) => {
       const lineItems = await stripe.checkout.sessions.listLineItems(session.id, { expand: ['data.price.product'] });
 
       // Detección de gift card
-      const { isGiftCard } = await detectGiftCard(session, lineItems, getCustomField);
-      if (!isGiftCard) return res.status(200).json({ received: true, ignored: true });
+function includesKeyword(txt = '') {
+  const nameKeywords = [
+    'gift card','gift-card','giftcard',
+    'tarjeta regalo','tarjeta-regalo','bono regalo',
+    'donación regalo','donacion regalo','donacion-regalo'
+  ];
+  const t = String(txt).toLowerCase();
+  for (const k of nameKeywords) {
+    if (t.includes(k)) return true;
+  }
+  return false;
+}
+
 
       // ====== MAPEO DE DATOS (según tus campos en Stripe) ======
       // Email del comprador (quien paga)
