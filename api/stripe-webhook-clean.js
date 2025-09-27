@@ -81,9 +81,30 @@ module.exports = async (req, res) => {
       (session.metadata && session.metadata.message) ||
       getCustomField(session, ['Mensaje para el cumpleañero']) || '';
 
-    const senderName =
+    // --- SENDER (remitente): CF/metadata -> nombre comprador -> prefijo email -> Stripe Customer
+    let senderName =
       (session.metadata && session.metadata.sender_name) ||
-      getCustomField(session, ['Tu nombre', 'Remitente', 'Quien envia', 'Sender']) || '';
+      getCustomField(session, ['Tu nombre', 'Remitente', 'Quien envia', 'Sender']) ||
+      (session.customer_details && session.customer_details.name) ||
+      '';
+
+    if (!senderName) {
+      const buyerMail =
+        (session.customer_details && session.customer_details.email) ||
+        session.customer_email ||
+        (session.metadata && session.metadata.buyer_email) ||
+        null;
+      if (buyerMail) senderName = String(buyerMail).split('@')[0];
+    }
+
+    if (!senderName && session.customer && typeof session.customer === 'string') {
+      try {
+        const cust = await stripe.customers.retrieve(session.customer);
+        senderName = cust.name || (cust.email ? String(cust.email).split('@')[0] : '') || '';
+      } catch (e) {
+        // no interrumpir si falla
+      }
+    }
 
     const amount = session.amount_total; // centavos
     const currency = session.currency;
@@ -106,11 +127,6 @@ module.exports = async (req, res) => {
     const mergeForSend = {};
     for (const [tag, val] of Object.entries(candidateMerge)) {
       if (existingTags.has(tag)) mergeForSend[tag] = val || '';
-    }
-
-    // Si no coincide ninguno, lo registramos para que puedas crear los campos
-    if (Object.keys(mergeForSend).length === 0) {
-      console.warn('No matching merge tags in audience. Existing tags:', Array.from(existingTags));
     }
 
     // Debug de valores y tags encontrados
