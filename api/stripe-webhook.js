@@ -45,7 +45,7 @@ module.exports = async (req, res) => {
     event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
   } catch (err) {
     console.error('❌ Firma inválida:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    return res.status(400).send(`Webhook Error: ${err.message}`); 
   }
 
   console.log('✅ Evento recibido:', event.type);
@@ -54,7 +54,7 @@ module.exports = async (req, res) => {
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
 
-    // Helper: obtiene el valor de un custom_field por posibles keys o por el texto del label.
+    // ---- Helper: obtiene el valor de un custom_field por posibles keys/labels
     function getCustomField(session, options = []) {
       const fields = session.custom_fields || [];
       const norm = (s) =>
@@ -67,12 +67,9 @@ module.exports = async (req, res) => {
       for (const f of fields) {
         const key = norm(f.key);
         const label = norm(f.label?.custom);
-
-        // ¿Coincide por key exacta?
         if (options.some((opt) => norm(opt) === key)) {
           return f.text?.value || '';
         }
-        // ¿Coincide por label (contiene)?
         if (options.some((opt) => label.includes(norm(opt)))) {
           return f.text?.value || '';
         }
@@ -81,102 +78,23 @@ module.exports = async (req, res) => {
     }
 
     try {
-      // Line items del checkout
+      // Line items del checkout (intentamos traer product expandido)
       const lineItems = await stripe.checkout.sessions.listLineItems(session.id, {
-        expand: ['data.price.product'], // intentamos expandir producto directo
+        expand: ['data.price.product'],
       });
 
-      // ========= DETECCIÓN DE GIFT CARD =========
-      let isGiftCard = false;
-      let giftItem = null;
-
-      // helpers para detectar "true"
-      const isTrue = (v) => {
-        const s = String(v ?? '').toLowerCase().trim();
-        return s === 'true' || s === '1' || v === true;
-      };
-      const giftKeys = ['gift_card', 'gift-card', 'giftcard'];
-
-      // 1) Reglas por metadata en price/product
-      for (const item of lineItems.data) {
-        // item.price.product puede venir expandido (objeto) o como ID string
-        let product = item.price && item.price.product;
-
-        if (product && typeof product === 'string') {
-          // No se expandió, la obtenemos
-          product = await stripe.products.retrieve(product);
-        }
-
-        const priceMd = (item.price && item.price.metadata) || {};
-        const prodMd = (product && product.metadata) || {};
-
-        // ¿Alguna key típica en price.metadata o product.metadata marcada a true?
-        const priceFlag = giftKeys.some((k) => isTrue(priceMd[k]));
-        const prodFlag = giftKeys.some((k) => isTrue(prodMd[k]));
-
-        if (priceFlag || prodFlag) {
-          console.log('🎯 Gift flag por metadata:', {
-            priceMetadata: priceMd,
-            productMetadata: prodMd,
-            matched: priceFlag ? 'price.metadata' : 'product.metadata',
-          });
-          isGiftCard = true;
-          giftItem = { item, product };
-          break;
-        }
-      }
-
-      // 2) Reglas por metadata en la session (por si el Payment Link lleva meta)
-      if (!isGiftCard) {
-        const sessionMeta = session.metadata || {};
-        const sessionFlag = giftKeys.some((k) => isTrue(sessionMeta[k]));
-        if (sessionFlag) {
-          console.log('🎯 Gift flag por session.metadata:', sessionMeta);
-          isGiftCard = true;
-        }
-      }
-
-      // 3) Reglas por presencia de custom fields (si están los campos típicos de la tarjeta)
-      if (!isGiftCard) {
-        const hasRecipientEmail = !!getCustomField(session, [
-          'email del cumpleañero',
-          'email cumpleanero',
-          'email del cumpleanero',
-          'email',
-        ]);
-        const hasRecipientName = !!getCustomField(session, [
-          'nombre del cumpleañero',
-          'nombre de la persona',
-          'nombre cumpleanero',
-          'nombre',
-        ]);
-        const hasMessage = !!getCustomField(session, [
-          'mensaje',
-          'mensaje para el cumpleañero',
-          'mensaje para el cumpleanero',
-        ]);
-
-        if (hasRecipientEmail || hasRecipientName || hasMessage) {
-          console.log('🎯 Gift flag por custom_fields:', {
-            hasRecipientEmail,
-            hasRecipientName,
-            hasMessage,
-            custom_fields: session.custom_fields,
-          });
-          isGiftCard = true;
-        }
-      }
-
+      // --- DETECCIÓN DE GIFT CARD (encapsulada) ---
+      const { isGiftCard, giftItem } = await detectGiftCard(session, lineItems);
       if (!isGiftCard) {
         console.log('ℹ️ Checkout completado pero NO es tarjeta regalo. Ignoramos.', {
           sessionMetadata: session.metadata,
-          customFields: session.custom_fields,
+          customFields: session.custom_fields
         });
         return res.status(200).json({ received: true, ignored: true });
       }
-      // ========= FIN DETECCIÓN =========
+      // --- FIN DETECCIÓN ---
 
-      // Aquí ya es gift card. Preparamos datos mínimos para Mailchimp:
+      // Aquí ya es gift card. Preparamos datos para Mailchimp:
       const customerEmail =
         session.customer_details?.email ||
         session.customer_email ||
@@ -188,7 +106,7 @@ module.exports = async (req, res) => {
       const recipientName = session.metadata?.recipient_name || '';
       const message = session.metadata?.message || '';
 
-      // Campos personalizados para Mailchimp
+      // Campos personalizados para Mailchimp (coinciden con tus MERGE TAGS)
       const mergeFields = {
         RECIPIENT: recipientName || '',
         GFTMSG: message || '',
@@ -219,11 +137,72 @@ module.exports = async (req, res) => {
       });
 
       // TODO: aquí envía el email / genera el PDF / guarda en DB / etc.
-
       return res.status(200).json({ received: true, giftcard: true });
     } catch (err) {
       console.error('❌ Error manejando checkout.session.completed:', err);
       return res.status(500).json({ error: 'handler_failed' });
+    }
+
+    // ---- función que encapsula la detección de gift card (dentro del handler) ----
+    async function detectGiftCard(session, lineItems) {
+      let isGiftCard = false;
+      let giftItem = null;
+
+      const giftKeys = ['gift_card', 'gift-card', 'giftcard'];
+      const isTrue = (v) => {
+        const s = String(v ?? '').toLowerCase().trim();
+        return s === 'true' || s === '1' || v === true;
+      };
+
+      // 1) Reglas por metadata en price/product
+      for (const item of lineItems.data) {
+        let product = item.price && item.price.product;
+        if (product && typeof product === 'string') {
+          product = await stripe.products.retrieve(product);
+        }
+        const priceMd = (item.price && item.price.metadata) || {};
+        const prodMd  = (product && product.metadata) || {};
+        if (giftKeys.some(k => isTrue(priceMd[k])) || giftKeys.some(k => isTrue(prodMd[k]))) {
+          console.log('🎯 Gift flag por metadata:', {
+            priceMetadata: priceMd,
+            productMetadata: prodMd
+          });
+          isGiftCard = true;
+          giftItem = { item, product };
+          break;
+        }
+      }
+
+      // 2) Reglas por metadata en la sesión (por si el Payment Link lleva meta)
+      if (!isGiftCard) {
+        const meta = session.metadata || {};
+        if (giftKeys.some(k => isTrue(meta[k]))) {
+          console.log('🎯 Gift flag por session.metadata:', meta);
+          isGiftCard = true;
+        }
+      }
+
+      // 3) Reglas por presencia de custom fields típicos
+      if (!isGiftCard) {
+        const hasRecipientEmail = !!getCustomField(session, [
+          'email del cumpleañero', 'email cumpleanero', 'email del cumpleanero', 'email'
+        ]);
+        const hasRecipientName  = !!getCustomField(session, [
+          'nombre del cumpleañero', 'nombre de la persona', 'nombre cumpleanero', 'nombre'
+        ]);
+        const hasMessage        = !!getCustomField(session, [
+          'mensaje', 'mensaje para el cumpleañero', 'mensaje para el cumpleanero'
+        ]);
+        if (hasRecipientEmail || hasRecipientName || hasMessage) {
+          console.log('🎯 Gift flag por custom_fields:', {
+            hasRecipientEmail, hasRecipientName, hasMessage,
+            custom_fields: session.custom_fields
+          });
+          isGiftCard = true;
+        }
+      }
+
+      return { isGiftCard, giftItem };
     }
   }
 
@@ -355,3 +334,4 @@ async function upsertMailchimpMember({ email, firstName = '', lastName = '', tag
     console.log('🏷️ Mailchimp tags:', tagRes.status, tagJson);
   }
 }
+
