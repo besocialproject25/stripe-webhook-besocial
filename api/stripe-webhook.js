@@ -2,7 +2,8 @@
 const Stripe = require('stripe');
 const getRawBody = require('raw-body');
 const mailchimp = require('@mailchimp/mailchimp_marketing');
-const crypto = require('crypto'); // para el hash MD5 del email
+const nodeCrypto = require('crypto');
+// para el hash MD5 del email
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: '2022-11-15',
 });
@@ -214,12 +215,10 @@ async function upsertMailchimpMember({ email, firstName = '', lastName = '', tag
   const server = process.env.MAILCHIMP_SERVER_PREFIX;
   const listId = process.env.MAILCHIMP_AUDIENCE_ID;
   const apiKey = process.env.MAILCHIMP_API_KEY;
-
-  const memberHash = crypto
-    .createHash('md5')
-    .update(email.toLowerCase())
-    .digest('hex');
-
+const memberHash = nodeCrypto
+  .createHash('md5')
+  .update(email.toLowerCase())
+  .digest('hex');
   // 1️⃣ Crear o actualizar el contacto
   const putUrl = `https://${server}.api.mailchimp.com/3.0/lists/${listId}/members/${memberHash}`;
   const putRes = await fetch(putUrl, {
